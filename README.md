@@ -1,11 +1,12 @@
+<<<<<<< HEAD
 # Knowledge Agent — JIRA + ServiceNow KB on Aurora Postgres + pgvector (AgentCore)
 
 Chat with **closed JIRA tickets and ServiceNow incidents** using
-Retrieval-Augmented Generation (RAG). The **Knowledge Agent** is fully
-implemented over both sources; **Triage, RCA, and Solution Recommendation**
-agents are registered placeholders with a defined build path. Applications are
-onboarded via a shared `applications` registry — each app may use JIRA,
-ServiceNow, or both.
+Retrieval-Augmented Generation (RAG). **Knowledge, Triage, RCA, and Solution
+Recommendation** agents are all implemented — every one answers **only** from
+retrieved KB chunks and refuses to guess when evidence is missing (§8.1).
+Applications are onboarded via a shared `applications` registry — each app may
+use JIRA, ServiceNow, or both.
 
 ```
 ┌─────────────┐   JQL (Closed/Done/Resolved)   ┌──────────────────────────┐
@@ -28,23 +29,25 @@ ServiceNow, or both.
                                                             │ hybrid_kb_search()
                                                             ▼
 User ──► FastAPI gateway (/invocations, /chat) ──► registry ──┬── knowledge ✅ (Claude 3.5 Sonnet)
-                                                              ├── triage    🔲 placeholder
-                                                              ├── rca       🔲 placeholder
-                                                              └── solution  🔲 placeholder
+                                                              ├── triage    ✅ (grounded)
+                                                              ├── rca       ✅ (grounded)
+                                                              └── solution  ✅ (grounded)
 ```
 
 ## 1. Agent roster
 
-| Agent        | Status         | File                                    | Purpose (now / planned)                                              |
-|--------------|----------------|-----------------------------------------|----------------------------------------------------------------------|
-| `knowledge`  | ✅ Implemented | `agents/knowledge_agent.py`             | Answers from closed tickets + incidents, with `[KEY]` citations.     |
-| `triage`     | 🔲 Placeholder | `agents/triage_agent.py`                | (Planned) Classify a **new** incident: severity, priority, team.     |
-| `rca`        | 🔲 Placeholder | `agents/rca_agent.py`                   | (Planned) Root-cause hypotheses with evidence from similar records.  |
-| `solution`   | 🔲 Placeholder | `agents/solution_agent.py`              | (Planned) Fix / workaround / rollback plan chained on triage + RCA.  |
+| Agent        | Status         | File                                    | Purpose                                                        |
+|--------------|----------------|-----------------------------------------|----------------------------------------------------------------|
+| `knowledge`  | ✅ Implemented | `agents/knowledge_agent.py`             | Answers from closed tickets + incidents, with `[KEY]` citations. |
+| `triage`     | ✅ Implemented | `agents/triage_agent.py`                | Classifies a **new** incident: severity, priority, owner — grounded in similar past records. |
+| `rca`        | ✅ Implemented | `agents/rca_agent.py`                   | Ranked root-cause hypotheses with record evidence + tests.     |
+| `solution`   | ✅ Implemented | `agents/solution_agent.py`              | Fix / workaround / rollback plan; every step cites a record.   |
 
 All agents share one contract (`agents/base.py`: `AgentRequest` in,
 `AgentResponse` out) and are routed by name in `agents/registry.py`.
-The default agent is `knowledge`.
+The default agent is `knowledge`. Triage/RCA/Solution share grounded-RAG
+plumbing in `agents/grounded.py` (see §8.1) and chain via `req.extra`
+(`triage` → `rca` → `solution`).
 
 ## 2. Tech stack (locked choices)
 
@@ -98,10 +101,12 @@ The default agent is `knowledge`.
 │       ├── agents/
 │       │   ├── base.py           ← AgentRequest (+source/group/app filters) /
 │       │   │                       AgentResponse / Citation (+source) / BaseAgent
-│       │   ├── knowledge_agent.py← full RAG implementation (§8)
-│       │   ├── triage_agent.py   ← 🔲 placeholder (§12)
-│       │   ├── rca_agent.py      ← 🔲 placeholder (§12)
-│       │   ├── solution_agent.py ← 🔲 placeholder (§12)
+│       │   ├── grounded.py       ← shared no-fabrication plumbing: no-chunks→no-model-call,
+│       │   │                       temperature 0, grounding preamble (§8.1)
+│       │   ├── knowledge_agent.py← RAG Q&A over both sources (§8)
+│       │   ├── triage_agent.py   ← grounded severity/priority/owner (§8.2)
+│       │   ├── rca_agent.py      ← grounded hypotheses + tests (§8.2)
+│       │   ├── solution_agent.py ← grounded fix/workaround/rollback (§8.2)
 │       │   └── registry.py       ← AGENT_REGISTRY + get_agent/list_agents/register_agent (§13)
 │       └── gateway/
 │           └── app.py            ← FastAPI: /ping /invocations /chat /agents (§9)
@@ -360,6 +365,55 @@ Behaviour notes:
    jira_url, score, source}], raw_context)` — citations render from the retrieved
    chunks of either source.
 
+### 8.1 Grounding guarantees — no fabricated solutions (all agents)
+
+Triage, RCA, and Solution share plumbing in `agents/grounded.py` that enforces
+KB-only answers structurally, not just by prompt wording:
+
+1. **No chunks → no model call.** If retrieval returns nothing,
+   `retrieve_or_insufficient()` returns a "Not enough evidence in the knowledge
+   base" verdict (plus what to try next) *without invoking Claude at all* — the
+   model never gets a chance to answer from parametric knowledge.
+2. **Deterministic decoding.** Every grounded call uses `temperature: 0`.
+3. **Strict system preamble** (`GROUNDING_PREAMBLE`, prepended to each agent's
+   prompt): use only provided records; every claim/judgement/step must cite its
+   `[KEY]`; if evidence is insufficient, say so, list what's missing, and stop —
+   never guess, extrapolate, or invent keys/commands/values.
+
+Net effect: the agents can only summarise, compare, and recombine what past
+closed records actually say. A fix step that no record supports cannot appear —
+the agent must instead report the gap and (for Solution) recommend escalation
+with the evidence bundle. All agents are **read-only**: none writes back to
+JIRA/ServiceNow; a human approves and applies every plan.
+
+### 8.2 Triage → RCA → Solution (implemented, grounded)
+
+**Triage** (`agents/triage_agent.py`, default top_k=10) — input: new incident
+text (+ optional `source_filter`/`app_code`/`project_filter`/`group_filter`).
+Outputs fixed sections: Severity (P1–P4) / Priority / Probable owner
+(team/component with source system) / Confidence (High/Med/Low) / Evidence /
+Immediate next steps / Gaps — each grounded in cited similar records.
+
+**RCA** (`agents/rca_agent.py`, default top_k=10) — input: incident + optional
+upstream triage in `extra.triage` (context only, not evidence). Weights
+`resolution` / `close_notes` / `work_notes` sections as primary evidence.
+Outputs: ranked hypotheses with supporting `[KEY]s` + likelihood, most-likely
+pick, tests to confirm (record-sourced only), disprovers, gaps.
+
+**Solution** (`agents/solution_agent.py`, default top_k=8) — input: incident +
+optional `extra.triage` / `extra.rca`. Outputs: numbered fix steps (every step
+cited, values quoted verbatim), workaround / rollback (or explicit "none in the
+KB"), risks, gaps. No supporting record → "Not enough evidence for a fix
+recommendation" + escalation guidance.
+
+**Chaining** — pass upstream outputs through `extra` (context, never evidence):
+```bash
+curl -X POST localhost:8080/invocations -H 'Content-Type: application/json' \
+  -d '{"agent":"solution","message":"Checkout returns 500 since 09:40 deploy",
+       "app_code":"CHECKOUT",
+       "extra":{"triage":"<triage answer>","rca":"<rca answer>"}}'
+```
+
 ## 9. Running & API reference
 
 ### 9.1 CLI
@@ -434,8 +488,12 @@ curl -X POST localhost:8080/invocations -H 'Content-Type: application/json' \
   -d '{"agent":"knowledge","message":"Checkout timeouts","app_code":"CHECKOUT","top_k":10}'
 
 curl -X POST localhost:8080/invocations -H 'Content-Type: application/json' \
-  -d '{"agent":"triage","message":"PROD outage: checkout returns 500"}'
-# → 200 with "[TriageAgent placeholder] ..." until implemented (§12)
+  -d '{"agent":"triage","message":"PROD outage: checkout returns 500","app_code":"CHECKOUT"}'
+
+curl -X POST localhost:8080/invocations -H 'Content-Type: application/json' \
+  -d '{"agent":"rca","message":"Checkout 500s after deploy, pool timeouts in logs",
+       "app_code":"CHECKOUT","extra":{"triage":"<paste triage answer>"}}'
+# See §8.2 for the full triage → rca → solution chaining pattern.
 ```
 
 ## 10. Configuration reference
@@ -504,26 +562,19 @@ Redeploys are the same command (rebuilds + pushes a new `:latest`, then creates 
 new runtime revision). Pointing the container at a new Aurora endpoint is an env
 change — no code change needed.
 
-## 12. Roadmap: Triage → RCA → Solution
+## 12. Extending Triage → RCA → Solution
 
-Build in this order; each reuses the layer below. Shared pattern: retrieve similar
-closed tickets, then prompt Claude with a task-specific system prompt.
+The three agents are implemented and grounded (§8.1–8.2). To extend them:
 
-**1. Triage** (`agents/triage_agent.py`) — input: new incident key or pasted
-summary/description. Embed → `kb_hybrid_search(top_k=10)` across both sources →
-Claude outputs `{severity, priority, probable_component, assignee_team,
-confidence}`. Optional: write priority/labels back via JIRA API or update the
-ServiceNow incident (needs write-scoped credentials; keep a human approval step).
-
-**2. RCA** (`agents/rca_agent.py`) — input: incident + triage output (pass via
-`extra`). Reuse `KnowledgeAgent.retrieve()` for similar past RCAs, prefer
-JIRA `section='resolution'` / SNOW `section='close_notes'` chunks → Claude outputs
-ranked hypotheses `{hypothesis, supporting_records, likelihood, test_to_confirm}`.
-
-**3. Solution** (`agents/solution_agent.py`) — input: incident + triage + RCA
-outputs in `req.extra`. Retrieve resolution/close-notes chunks → Claude outputs
-`{recommended_fix, workaround, rollback_plan, risks, record_refs}`.
-Human-in-the-loop approval before any JIRA / ServiceNow write-back.
+- **Tune retrieval depth** per agent via `default_top_k` in each file, or per call
+  with `top_k`.
+- **Weight resolution evidence** — RCA/Solution prompts already prioritise
+  `resolution` / `close_notes` sections; to enforce it deterministically, add a
+  section preference in `retriever.py` (e.g. score boost for those sections).
+- **Write-back (optional, off by default)** — add a JIRA/ServiceNow update call
+  behind an explicit human-approval flag; keep these agents read-only until then.
+- **Chaining** stays via `req.extra` (`triage` → `rca` → `solution`); upstream
+  text is labelled context-only so it can never substitute for cited evidence.
 
 ## 13. Adding a new agent
 
@@ -574,3 +625,6 @@ Human-in-the-loop approval before any JIRA / ServiceNow write-back.
   rotation in production.
 - The `/invocations` API is unauthenticated by default — front it with API Gateway
   / IAM / Cognito or AgentCore's auth before exposing beyond your VPC.
+=======
+# 016_AgentCore_Chatbot
+>>>>>>> 87a975faecc0e250b10124690fd89ffcf41308be

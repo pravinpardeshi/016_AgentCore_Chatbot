@@ -14,9 +14,9 @@ from .triage_agent import TriageAgent
 
 AGENT_REGISTRY: dict[str, BaseAgent] = {
     "knowledge": KnowledgeAgent(),
-    "triage": TriageAgent(),       # placeholder
-    "rca": RCAAgent(),             # placeholder
-    "solution": SolutionAgent(),   # placeholder
+    "triage": TriageAgent(),       # grounded in KB records
+    "rca": RCAAgent(),             # grounded in KB records
+    "solution": SolutionAgent(),   # grounded in KB records
 }
 
 
