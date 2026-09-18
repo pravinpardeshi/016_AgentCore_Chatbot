@@ -1,0 +1,16 @@
+# Python venv / build
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Env / secrets
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
