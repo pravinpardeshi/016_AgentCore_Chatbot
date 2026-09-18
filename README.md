@@ -625,4 +625,4 @@ The three agents are implemented and grounded (§8.1–8.2). To extend them:
 - The `/invocations` API is unauthenticated by default — front it with API Gateway
   / IAM / Cognito or AgentCore's auth before exposing beyond your VPC.
 =======
-# 016_AgentCore_Chatbot
+
