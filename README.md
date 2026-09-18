@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Knowledge Agent — JIRA + ServiceNow KB on Aurora Postgres + pgvector (AgentCore)
 
 Chat with **closed JIRA tickets and ServiceNow incidents** using
@@ -627,4 +626,3 @@ The three agents are implemented and grounded (§8.1–8.2). To extend them:
   / IAM / Cognito or AgentCore's auth before exposing beyond your VPC.
 =======
 # 016_AgentCore_Chatbot
->>>>>>> 87a975faecc0e250b10124690fd89ffcf41308be
